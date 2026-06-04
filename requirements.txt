@@ -1,0 +1,5 @@
+flask==3.0.3
+flask-socketio==5.3.6
+requests==2.32.3
+PySocks==1.7.1
+gunicorn==23.0.0
