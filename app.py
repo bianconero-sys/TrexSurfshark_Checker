@@ -159,11 +159,41 @@ def is_candidate(cookies: Dict[str, str]) -> bool:
     return bool(cookies) and any(k in cookies for k in SESSION_KEYS)
 
 
+def clean_cookie_text(raw: str) -> str:
+    """Strip leading/trailing metadata, separators, and prior-export headers so
+    only the actual cookie data remains (Netscape lines, JSON array, or a
+    name=value;... string). Prevents old 'trash' from riding along on export."""
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    if text.lstrip().startswith(("[", "{")):     # JSON array/object — already clean
+        return text
+    lines = text.splitlines()
+
+    def is_cookie_line(ln: str) -> bool:
+        t = ln.strip()
+        if not t:
+            return False
+        if re.fullmatch(r"[-=_*#~.\s]{3,}", t):          # separator line
+            return False
+        if "\t" in ln and len(ln.split("\t")) >= 7:      # Netscape row
+            return True
+        # header / loose "key=value" (but not a "Label: value" metadata line)
+        if "=" in t and not re.match(r"^[A-Za-z][\w .\-]*:\s", t):
+            return True
+        return False
+
+    idx = [i for i, ln in enumerate(lines) if is_cookie_line(ln)]
+    if not idx:
+        return text                                       # couldn't detect — leave as-is
+    return "\n".join(lines[idx[0]:idx[-1] + 1]).strip()
+
+
 def cookie_sets_from_text(text: str, filename: str) -> List[Tuple[str, Dict[str, str], str]]:
     cookies = parse_cookies(text)
     if not cookies:
         return []
-    return [(filename, cookies, text.strip())]
+    return [(filename, cookies, clean_cookie_text(text))]
 
 
 def cookie_sets_from_zip(data: bytes) -> List[Tuple[str, Dict[str, str], str]]:
@@ -180,7 +210,7 @@ def cookie_sets_from_zip(data: bytes) -> List[Tuple[str, Dict[str, str], str]]:
                     continue
                 cookies = parse_cookies(raw)
                 if cookies and is_candidate(cookies):
-                    out.append((os.path.basename(info.filename), cookies, raw.strip()))
+                    out.append((os.path.basename(info.filename), cookies, clean_cookie_text(raw)))
     except Exception:
         pass
     return out
@@ -538,7 +568,7 @@ def check_single():
     cookies = parse_cookies(raw)
     proxies = parse_proxies(proxies_text) if proxies_text.strip() else []
     retries = int(payload.get("retries", 3) or 3)
-    result = validate_with_retry("single", cookies, raw, proxies, True, max(1, retries))
+    result = validate_with_retry("single", cookies, clean_cookie_text(raw), proxies, True, max(1, retries))
     return jsonify(result.to_dict())
 
 
