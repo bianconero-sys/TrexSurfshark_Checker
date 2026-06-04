@@ -1,6 +1,6 @@
 # ─────────────────────────────────────────────────────────────────────────────
 #  Surfshark Validator — Web Edition
-#  Fast API validation | Web layer by Trex
+#  Fast API validation (no Playwright) | Web layer by Trex
 # ─────────────────────────────────────────────────────────────────────────────
 
 from flask import Flask, render_template_string, request, jsonify
@@ -39,6 +39,7 @@ BATCH: Dict[str, Any] = {"running": False}
 PREFLIGHT_URL = "https://my.surfshark.com/account"
 ORDERS_URL    = "https://my.surfshark.com/account/p_api/v1/payment/orders"
 PROFILE_URL   = "https://my.surfshark.com/account/p_api/v1/identity/altid/profile"
+ASSIGN_URL    = "https://my.surfshark.com/account/p_api/v1/account/authorization/assign"
 TIMEOUT       = (10, 25)
 
 SESSION_KEYS = {"_ssli", "_ssrtk"}
@@ -342,6 +343,72 @@ def validate_one(source_file: str, cookies: Dict[str, str], raw_text: str,
     )
 
 
+def activate_device(cookies: Dict[str, str], code: str, proxy: Optional[str]) -> dict:
+    """Assign/activate a device using a Surfshark login code while authenticated
+    via the account cookies. Mirrors the browser: preflight to refresh the access
+    session, then POST {"code": CODE} to the authorization/assign endpoint."""
+    code = (code or "").strip().upper()
+    if not is_candidate(cookies):
+        return {"ok": False, "logged_in": False, "message": "No Surfshark session cookie in the pasted cookie"}
+    if not re.fullmatch(r"[A-Z0-9]{4,10}", code):
+        return {"ok": False, "logged_in": False, "message": "Enter a valid activation code (4-10 letters/numbers)"}
+    try:
+        session = make_session(cookies, proxy)
+        # Preflight: refresh the access session from the _ssrtk refresh token.
+        try:
+            pre = session.get(PREFLIGHT_URL, headers=PAGE_HEADERS, timeout=TIMEOUT,
+                              allow_redirects=True, stream=True)
+            pre.close()
+        except requests.RequestException:
+            pass
+        # Best-effort: confirm logged in + grab the email to show in the result.
+        email = None
+        try:
+            rp = session.get(PROFILE_URL, headers=BASE_HEADERS, timeout=TIMEOUT, allow_redirects=False)
+            if rp.status_code in (401, 403):
+                return {"ok": False, "logged_in": False, "message": "Cookie expired / not logged in"}
+            if rp.status_code == 200:
+                data = rp.json()
+                profiles = data if isinstance(data, list) else [data]
+                for prof in profiles:
+                    emails = (prof or {}).get("emails") or []
+                    primary = next((e for e in emails if e.get("primary")), None) or (emails[0] if emails else None)
+                    if primary and primary.get("email"):
+                        email = primary["email"]
+                        break
+        except Exception:
+            pass
+
+        headers = {**BASE_HEADERS, "Content-Type": "application/json",
+                   "Origin": "https://my.surfshark.com",
+                   "Referer": "https://my.surfshark.com/account/login-code"}
+        r = session.post(ASSIGN_URL, headers=headers, json={"code": code},
+                         timeout=TIMEOUT, allow_redirects=False)
+    except requests.RequestException as e:
+        return {"ok": False, "logged_in": True, "message": f"Network error: {type(e).__name__}"}
+    except Exception as e:
+        return {"ok": False, "logged_in": True, "message": str(e)[:160]}
+
+    if r.status_code in (200, 201, 204):
+        return {"ok": True, "logged_in": True, "email": email,
+                "message": f"Device activated with code {code}" + (f" on {email}" if email else "")}
+    if r.status_code in (401, 403):
+        return {"ok": False, "logged_in": False, "message": "Cookie expired / not logged in"}
+
+    detail = ""
+    try:
+        body = r.json()
+        if isinstance(body, dict):
+            detail = body.get("message") or body.get("error") or body.get("detail") or ""
+    except Exception:
+        detail = (r.text or "")[:120]
+    if r.status_code in (400, 404, 409, 422):
+        return {"ok": False, "logged_in": True, "email": email,
+                "message": detail or "Invalid or expired activation code"}
+    return {"ok": False, "logged_in": True, "email": email,
+            "message": detail or f"Activation failed (HTTP {r.status_code})"}
+
+
 def validate_with_retry(source_file: str, cookies: Dict[str, str], raw_text: str,
                         proxies: List[str], do_preflight: bool,
                         max_attempts: int = 3) -> ValidationResult:
@@ -473,6 +540,23 @@ def check_single():
     retries = int(payload.get("retries", 3) or 3)
     result = validate_with_retry("single", cookies, raw, proxies, True, max(1, retries))
     return jsonify(result.to_dict())
+
+
+@app.route("/api/activate", methods=["POST"])
+def activate():
+    payload = request.get_json(silent=True) or {}
+    raw = (payload.get("cookie") or "").strip()
+    code = (payload.get("code") or "").strip()
+    proxies_text = payload.get("proxies", "")
+    if not raw:
+        return jsonify({"ok": False, "message": "No cookie provided"}), 400
+    if not code:
+        return jsonify({"ok": False, "message": "No activation code provided"}), 400
+    cookies = parse_cookies(raw)
+    proxies = parse_proxies(proxies_text) if proxies_text.strip() else []
+    proxy = random.choice(proxies) if proxies else None
+    result = activate_device(cookies, code, proxy)
+    return jsonify(result)
 
 
 @app.route("/api/batch", methods=["POST"])
