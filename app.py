@@ -1,6 +1,6 @@
 # ─────────────────────────────────────────────────────────────────────────────
-#  Surfshark Validator — Web Edition
-#  Fast API validation (no Playwright) | Web layer by Trex
+#  Surfshark Checker — Web Edition
+#  Fast API validation | Web layer by Trex
 # ─────────────────────────────────────────────────────────────────────────────
 
 from flask import Flask, render_template_string, request, jsonify
