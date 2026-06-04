@@ -328,6 +328,28 @@ tbody td{padding:10px 13px;font-family:'DM Mono',monospace;color:var(--text2);
 .info-block{font-size:13px;color:var(--text2);line-height:1.9}
 .info-block b{color:var(--accent);font-weight:600}
 .info-block .mono{color:var(--muted)}
+.con-count{margin-left:auto;font-size:11px;font-weight:600;color:var(--muted)}
+.con-clear{background:var(--field);border:1px solid var(--glass-bd);color:var(--text2);
+  cursor:pointer;font-size:11px;font-weight:700;padding:4px 10px;border-radius:8px;margin-left:10px;
+  font-family:inherit;letter-spacing:.02em;transition:color .15s,border-color .15s}
+.con-clear:hover{color:var(--text)}
+.console{margin-top:12px;height:240px;overflow-y:auto;border-radius:12px;background:rgba(0,0,0,.32);
+  border:1px solid var(--glass-bd);padding:10px 12px;
+  font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:11.5px;line-height:1.7}
+.console::-webkit-scrollbar{width:8px}
+.console::-webkit-scrollbar-thumb{background:var(--glass-bd);border-radius:4px}
+.con-empty{color:var(--muted);font-style:italic}
+.cl{display:flex;gap:8px;white-space:nowrap;align-items:baseline}
+.cl .ct-t{color:var(--muted);flex-shrink:0}
+.cl .ct-tag{font-weight:700;flex-shrink:0;width:62px}
+.cl .ct-msg{color:var(--text2);overflow:hidden;text-overflow:ellipsis}
+.cl.paid .ct-tag{color:var(--accent)}
+.cl.free .ct-tag{color:var(--cyan)}
+.cl.invalid .ct-tag{color:var(--red)}
+.cl.error .ct-tag{color:var(--violet)}
+.cl.dup .ct-tag{color:var(--blue)}
+.cl.sys .ct-tag{color:var(--text2)}
+.cl.error .ct-msg{color:var(--violet)}
 
 /* ═══ Responsive ═════════════════════════════════════════════════════════ */
 @media(max-width:880px){.stats{grid-template-columns:repeat(3,1fr)}}
@@ -525,6 +547,14 @@ tbody td{padding:10px 13px;font-family:'DM Mono',monospace;color:var(--text2);
       <button class="btn btn-p btn-full" id="batch-btn"><svg class="ico" viewBox="0 0 24 24"><path d="M6 4l14 8-14 8z"/></svg>Start Batch</button>
       <div style="height:9px"></div>
       <button class="btn btn-d btn-full" id="stop-btn" style="display:none"><svg class="ico" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>Stop Processing</button>
+
+      <div class="card glass" style="margin-top:18px">
+        <div class="ct"><div class="ctd"></div>Live Console
+          <span id="con-count" class="con-count">0 lines</span>
+          <button id="con-clear" class="con-clear">Clear</button>
+        </div>
+        <div class="console" id="console"><div class="con-empty">Console output appears here as cookies are processed…</div></div>
+      </div>
     </div>
 
     <!-- ── RESULTS ───────────────────────────────────────── -->
@@ -629,6 +659,33 @@ var BADGE={
 var TITLES={single:'Single Cookie Check',batch:'Dashboard',results:'Live Results',settings:'Settings'};
 
 /* Export field toggles (key -> label) — matches server EXPORT_FIELD_LABELS */
+/* ── Live console ── */
+var CON_MAX=200, conLines=0;
+function _conEl(){return ge('console');}
+function conReset(){var el=_conEl();if(el){el.innerHTML='';conLines=0;updConCount();}}
+function updConCount(){var c=ge('con-count');if(c)c.textContent=conLines+' line'+(conLines===1?'':'s');}
+function conAppend(cls,tag,msg){
+  var el=_conEl();if(!el)return;
+  var empty=el.querySelector('.con-empty');if(empty)empty.remove();
+  var atBottom=el.scrollHeight-el.scrollTop-el.clientHeight<40;
+  var t=new Date().toLocaleTimeString('en-GB');
+  var row=document.createElement('div');row.className='cl '+cls;
+  row.innerHTML='<span class="ct-t">'+t+'</span><span class="ct-tag">'+esc(tag)+'</span><span class="ct-msg">'+esc(msg)+'</span>';
+  el.appendChild(row);conLines++;
+  while(el.childNodes.length>CON_MAX){el.removeChild(el.firstChild);}
+  updConCount();
+  if(atBottom)el.scrollTop=el.scrollHeight;
+}
+function conSys(msg){conAppend('sys','SYSTEM',msg);}
+function conLog(r){
+  var who=r.email||r.source_file||'cookie';
+  if(r.status==='valid'&&r.is_paid)      conAppend('paid','PAID',who+' — '+(r.product||'active')+(r.expires?' · exp '+r.expires:''));
+  else if(r.status==='valid')            conAppend('free','FREE',who+' — '+(r.product||'no active sub'));
+  else if(r.status==='duplicate')        conAppend('dup','DUP',who+' — duplicate email');
+  else if(r.status==='error')            conAppend('error','ERROR',(r.source_file||who)+' — '+(r.reason||'request failed'));
+  else                                   conAppend('invalid','INVALID',(r.source_file||who)+' — '+(r.reason||'not logged in'));
+}
+
 var FIELDS=[
   ['email','Email'],['product','Product'],['sub_status','Status'],['expires','Expires'],
   ['recurring','Recurring'],['frequency','Frequency'],['date','Date'],
@@ -661,7 +718,7 @@ function initSocket(){
   socket=io({transports:['websocket','polling']});
   socket.on('connect',function(){setDot(true);var l=ge('conn-lbl');if(l)l.textContent='live';});
   socket.on('disconnect',function(){setDot(false);var l=ge('conn-lbl');if(l)l.textContent='–';});
-  socket.on('result_row',function(r){if(batchStopped)return;allResults.push(r);scheduleRender();});
+  socket.on('result_row',function(r){if(batchStopped)return;allResults.push(r);conLog(r);scheduleRender();});
   socket.on('counts',function(d){if(batchStopped)return;onCounts(d);});
   socket.on('batch_done',function(d){if(batchStopped)return;onBatchDone(d);});
 }
@@ -768,6 +825,7 @@ function startBatch(){
   if(paste)fd.append('paste_text',paste);
   if(zipFile)fd.append('cookies',zipFile);else multiFiles.forEach(function(f){fd.append('cookies',f);});
   resetUI();batchStopped=false;
+  conReset();conSys('Batch started — uploading cookies…');
   ge('batch-btn').disabled=true;ge('batch-btn').textContent='Uploading…';ge('stop-btn').style.display='block';
   setProg(0,'Uploading…');
   var xhr=new XMLHttpRequest();xhr.open('POST','/api/batch');
@@ -797,11 +855,12 @@ function onCounts(d){
     setProg(p,msg);
   }
 }
-function onBatchDone(d){onCounts(d);resetBtn();setProg(100,'Done — '+(d.paid||0)+' paid, '+(d.free||0)+' free, '+(d.duplicate||0)+' dup');showTiers(d.plans||{});toast('Batch done! '+(d.paid||0)+' paid hits found.','ok');}
+function onBatchDone(d){onCounts(d);resetBtn();setProg(100,'Done — '+(d.paid||0)+' paid, '+(d.free||0)+' free, '+(d.duplicate||0)+' dup');showTiers(d.plans||{});toast('Batch done! '+(d.paid||0)+' paid hits found.','ok');conSys('Batch complete — '+(d.paid||0)+' paid, '+(d.free||0)+' free, '+(d.invalid||0)+' invalid, '+(d.error||0)+' error, '+(d.duplicate||0)+' dup');}
 function showTiers(t){var h=Object.keys(t).filter(function(k){return t[k]>0;}).map(function(k){return '<div class="tprow"><span class="tpname">'+esc(k)+'</span><span class="tpcnt">'+t[k]+'</span></div>';}).join('');ge('tier-grid').innerHTML=h||'<div class="prog-txt">No paid hits yet</div>';ge('tier-card').style.display='block';}
 
 /* ── Results table ── */
 ge('clr-btn').addEventListener('click',function(){allResults=[];renderTable();});
+(function(){var c=ge('con-clear');if(c)c.addEventListener('click',conReset);})();
 ge('exp-btn').addEventListener('click',exportZip);
 ge('search-input').addEventListener('input',function(){searchQ=this.value.toLowerCase();renderTable();});
 document.querySelectorAll('.fb').forEach(function(b){b.addEventListener('click',function(){setFilter(b.dataset.f);});});

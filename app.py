@@ -39,7 +39,7 @@ BATCH: Dict[str, Any] = {"running": False}
 PREFLIGHT_URL = "https://my.surfshark.com/account"
 ORDERS_URL    = "https://my.surfshark.com/account/p_api/v1/payment/orders"
 PROFILE_URL   = "https://my.surfshark.com/account/p_api/v1/identity/altid/profile"
-TIMEOUT       = (8, 20)
+TIMEOUT       = (10, 25)
 
 SESSION_KEYS = {"_ssli", "_ssrtk"}
 
@@ -229,19 +229,27 @@ def fetch_account(session: requests.Session) -> Tuple[dict, str]:
             "expires": None, "recurring": None, "frequency": None, "is_paid": False}
 
     # 0) Preflight — refresh access session from the _ssrtk refresh token.
+    #    stream=True: we only need the Set-Cookie headers (session refresh), NOT
+    #    the heavy account HTML body — so we never download it. This is what kept
+    #    timing out under concurrency. A preflight hiccup is non-fatal; the orders
+    #    call below is the real authority on valid/invalid/error.
     try:
-        session.get(PREFLIGHT_URL, headers=PAGE_HEADERS, timeout=TIMEOUT, allow_redirects=True)
+        pre = session.get(PREFLIGHT_URL, headers=PAGE_HEADERS, timeout=TIMEOUT,
+                          allow_redirects=True, stream=True)
+        pre.close()
     except requests.RequestException:
-        return info, "error"
+        pass
 
     # 1) Orders — auth check + subscription data.
     try:
         r = session.get(ORDERS_URL, headers=BASE_HEADERS, timeout=TIMEOUT, allow_redirects=False)
-    except requests.RequestException:
+    except requests.RequestException as e:
+        info["error"] = f"{type(e).__name__}"
         return info, "error"
     if r.status_code in (301, 302, 303, 307, 308, 401, 403):
         return info, "invalid"
     if r.status_code != 200:
+        info["error"] = f"HTTP {r.status_code}"
         return info, "invalid"
     try:
         orders = r.json()
@@ -320,7 +328,7 @@ def validate_one(source_file: str, cookies: Dict[str, str], raw_text: str,
 
     if status == "error":
         return ValidationResult(source_file=source_file, status="error",
-                                reason="Request failed", cookie_text=raw_text)
+                                reason=info.get("error") or "Request failed", cookie_text=raw_text)
     if status != "valid" or not info.get("logged_in"):
         return ValidationResult(source_file=source_file, status="invalid",
                                 reason="Expired / not logged in", cookie_text=raw_text)
@@ -348,7 +356,8 @@ def validate_with_retry(source_file: str, cookies: Dict[str, str], raw_text: str
             return res
         last = res
     if last is not None:
-        last.reason = f"Request failed after {attempts} attempt(s)"
+        base = last.reason or "Request failed"
+        last.reason = f"{base} (after {attempts} attempt{'s' if attempts != 1 else ''})"
     return last or ValidationResult(source_file=source_file, status="error",
                                     reason="Request failed", cookie_text=raw_text)
 
